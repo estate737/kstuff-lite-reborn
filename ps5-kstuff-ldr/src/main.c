@@ -50,6 +50,9 @@ along with this program; see the file COPYING. If not, see
 #include "utils.h"
 #include "../../lib/r0gdb-bootstrap.h"
 #include "../../lib/shellcore-imports.h"
+#ifdef KSTUFF_BYEPERVISOR
+#include "reborn.h"
+#endif
 
 asm(".section .rodata\n"
     ".global ___ps5_kstuff_payload_bin\n"
@@ -523,6 +526,12 @@ pt_load(const void* image, void* base, Elf64_Phdr *phdr) {
 
 int main(void) {
     sceKernelSetProcessName("kstuff.elf");
+#ifdef KSTUFF_BYEPERVISOR
+    if (byepervisor_prepare() != 0) {
+        klog_printf("Byepervisor preparation failed; kstuff was not installed\n");
+        return EXIT_FAILURE;
+    }
+#endif
     Elf64_Ehdr *ehdr = (Elf64_Ehdr*)___ps5_kstuff_payload_bin;
     Elf64_Phdr *phdr = (Elf64_Phdr*)(___ps5_kstuff_payload_bin + ehdr->e_phoff);
     void *base = (void*)0x0000000926100000;

@@ -79,3 +79,4 @@ make -C ps5-kstuff-ldr clean
 
 make -C ps5-kstuff "${kstuff_make_args[@]}"
 make -C ps5-kstuff-ldr KSTUFF_OBS="$kstuff_obs"
+make -C ps5-kstuff-ldr KSTUFF_OBS="$kstuff_obs" reborn

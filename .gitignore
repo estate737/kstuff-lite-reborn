@@ -8,6 +8,7 @@ refs/*
 /lib/syscalls-ps5.asm
 # Build artifacts from ps5-kstuff-ldr/.
 /ps5-kstuff-ldr/kstuff.elf
+/byepervisor/break_hv_payload/break_hv.h
 /ps5-kstuff-ldr/payload_bin.c
 
 # Build artifacts from ps5-kstuff/.

@@ -40,6 +40,22 @@ SRC := $(shell find src -name '*.c')
 
 all: kstuff.elf
 
+REBORN_DIR := ../byepervisor
+REBORN_SRC := $(filter-out $(REBORN_DIR)/khook.c,$(wildcard $(REBORN_DIR)/*.c))
+REBORN_OBJ := $(REBORN_DIR)/khook.o
+REBORN_HDR := $(REBORN_DIR)/break_hv_payload/break_hv.h
+
+reborn: kstuff-reborn.elf
+
+$(REBORN_HDR): $(REBORN_DIR)/break_hv_payload/break_hv.c $(REBORN_DIR)/break_hv_payload/entry.S $(REBORN_DIR)/break_hv_payload/link.ld $(REBORN_DIR)/break_hv_payload/build.sh
+	sh $(REBORN_DIR)/break_hv_payload/build.sh
+
+$(REBORN_OBJ): $(REBORN_DIR)/khook.c $(wildcard $(REBORN_DIR)/include/*.h)
+	$(CC) $(CFLAGS) -I$(REBORN_DIR)/include -O0 -fno-omit-frame-pointer -c $< -o $@
+
+kstuff-reborn.elf: ../ps5-kstuff/payload.bin $(SRC) $(REBORN_SRC) $(REBORN_OBJ) $(REBORN_HDR) $(wildcard $(REBORN_DIR)/include/*.h) $(wildcard $(REBORN_DIR)/include/offsets/*.h) include/shellcore_dynlib_abi.h ../lib/r0gdb-bootstrap.h ../lib/shellcore-imports.h
+	$(CC) $(CPPFLAGS) -I$(REBORN_DIR)/include $(CFLAGS) $(LOADER_OPT) -DKSTUFF_BYEPERVISOR=1 $(SRC) $(REBORN_SRC) $(REBORN_OBJ) -o $@ $(LDFLAGS)
+
 .FORCE:
 
 ../ps5-kstuff/payload.bin: .FORCE
@@ -50,6 +66,7 @@ kstuff.elf: ../ps5-kstuff/payload.bin $(SRC) include/shellcore_dynlib_abi.h ../l
 
 clean:
 	rm -f *.o *.elf
+	rm -f $(REBORN_OBJ) $(REBORN_HDR) $(REBORN_DIR)/break_hv_payload/*.o $(REBORN_DIR)/break_hv_payload/*.bin $(REBORN_DIR)/break_hv_payload/*.elf
 
 test: kstuff.elf
 	$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $^
