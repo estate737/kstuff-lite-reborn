@@ -11,24 +11,26 @@
 
 int kread(uint64_t kaddr, void *dst, size_t len)
 {
-  return kernel_copyout(kaddr, dst, len);
+  kernel_copyout(kaddr, dst, len);
+  return 0;
 }
 
 int kwrite(uint64_t kaddr, const void *src, size_t len)
 {
-  return kernel_copyin(src, kaddr, len);
+  kernel_copyin(src, kaddr, len);
+  return 0;
 }
 
 uint32_t kread32(uint64_t kaddr)
 {
-  uint32_t v = 0;
+  uint32_t v;
   kread(kaddr, &v, sizeof(v));
   return v;
 }
 
 uint64_t kread64(uint64_t kaddr)
 {
-  uint64_t v = 0;
+  uint64_t v;
   kread(kaddr, &v, sizeof(v));
   return v;
 }
@@ -56,8 +58,7 @@ int pin_to_core(int num)
 
   mask[0] = 0xFFFF;
   mask[1] = 0;
-  if (cpuset_setaffinity(3, 3, new_id, 8, (const cpuset_t *) mask))
-    return 1;
+  cpuset_setaffinity(3, 3, new_id, 8, (const cpuset_t *) mask);
   
   // Sony system so code that makes sense must be commented out
   //mask[0] = (1 << num);
@@ -97,7 +98,7 @@ void klog(const char *fmt, ...)
 
   va_list args;
   va_start(args, fmt);
-  vsnprintf(buffer, sizeof(buffer), fmt, args);
+  vsprintf(buffer, fmt, args);
   va_end(args);
 
   sceKernelDebugOutText(0, buffer);

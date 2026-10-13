@@ -398,10 +398,6 @@ int kh_install(khook_t *kh, const kh_chain_t *handler)
 
   save_len    = 0x58;
   handler_len = (handler && handler->len) ? handler->len : 0;
-  /* Reserve the register restore and the largest possible resume tail before
-   * copying the handler or emitting qwords into the fixed-size buffer. */
-  if (handler_len > sizeof bigbuf - save_len - 0x30 - 0xA0)
-    return -6;
   restore_off = save_len + handler_len;
   slot_rdi = big + restore_off + 0x08;
   slot_rsi = big + restore_off + 0x18;

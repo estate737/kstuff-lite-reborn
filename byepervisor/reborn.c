@@ -64,15 +64,13 @@ static int install_resume_hook(uint64_t cave, uint64_t cr3)
 
     ret = kh_install(&hook, &chain);
     if (ret) return ret;
-    /* Persist recovery state before arming the hardware breakpoint. */
-    if (kwrite(cave + CAVE_SAVE_OFF, &hook.saved_gate_lo, 8) ||
-        kwrite(cave + CAVE_SAVE_OFF + 8, &hook.saved_gate_hi, 8) ||
-        kwrite(cave + CAVE_SAVE_OFF + 16, &hook.saved_ist, 8) ||
-        kwrite(cave + CAVE_STATE_OFF, &(uint64_t){STATE_ARMED}, 8)) {
-        kh_restore(&hook);
-        return -1;
-    }
     kh_trigger(&hook);
+    /* Keep this order identical to the standalone upstream payload: the
+     * single-step trigger must complete before the state is persisted. */
+    kwrite64(cave + CAVE_SAVE_OFF + 0x00, hook.saved_gate_lo);
+    kwrite64(cave + CAVE_SAVE_OFF + 0x08, hook.saved_gate_hi);
+    kwrite64(cave + CAVE_SAVE_OFF + 0x10, hook.saved_ist);
+    kwrite64(cave + CAVE_STATE_OFF, STATE_ARMED);
     return 0;
 }
 
@@ -94,61 +92,44 @@ static int uninstall_hook(uint64_t cave)
     return kh_restore(&hook);
 }
 
-static int update_entry(uint64_t addr, uint64_t value, uint64_t clear, uint64_t set)
-{
-    if (addr == UINT64_MAX) return -1;
-    value = (value & ~clear) | set;
-    return kwrite(addr, &value, sizeof(value));
-}
-
 static int prepare_page_tables(uint64_t pmap)
 {
-    uint64_t va = kdldmap(STARTUP_MP_PAYLOAD_PAGE), value = 0, addr;
-    const uint64_t nx = 1ULL << PDE_EXECUTE_DISABLE;
-    const uint64_t xo = 1ULL << PDE_XOTEXT;
-    const uint64_t rw = 1ULL << PDE_RW;
-    addr = find_pml4e(pmap, va, &value);
-    if (addr == UINT64_MAX || update_entry(addr, value, nx, 0)) return -1;
-    addr = find_pdpe(pmap, va, &value);
-    if (addr == UINT64_MAX || update_entry(addr, value, nx, 0)) return -1;
-    if (!PDE_FIELD(value, PS)) {
-        addr = find_pde(pmap, va, &value);
-        if (addr == UINT64_MAX || update_entry(addr, value, nx, 0)) return -1;
-        if (!PDE_FIELD(value, PS)) {
-            addr = find_pte(pmap, va, &value);
-            if (addr == UINT64_MAX || update_entry(addr, value, nx, 0)) return -1;
+    uint64_t pml4e_addr, pdpe_addr, pde_addr, pte_addr;
+    uint64_t pml4e, pdpe, pde, pte;
+    uint64_t va = kdldmap(STARTUP_MP_PAYLOAD_PAGE);
+
+    pml4e_addr = find_pml4e(pmap, va, &pml4e);
+    CLEAR_PDE_BIT(pml4e, EXECUTE_DISABLE);
+    kwrite64(pml4e_addr, pml4e);
+
+    pdpe_addr = find_pdpe(pmap, va, &pdpe);
+    CLEAR_PDE_BIT(pdpe, EXECUTE_DISABLE);
+    kwrite64(pdpe_addr, pdpe);
+
+    if (PDE_FIELD(pdpe, PS) != 1) {
+        pde_addr = find_pde(pmap, va, &pde);
+        CLEAR_PDE_BIT(pde, EXECUTE_DISABLE);
+        kwrite64(pde_addr, pde);
+        if (PDE_FIELD(pde, PS) != 1) {
+            pte_addr = find_pte(pmap, va, &pte);
+            CLEAR_PDE_BIT(pte, EXECUTE_DISABLE);
+            kwrite64(pte_addr, pte);
         }
     }
 
-    /* Walk only real leaf mappings, including 1 GiB and 2 MiB pages. */
-    for (va = ktext(0); va < (uint64_t)KERNEL_ADDRESS_DATA_BASE; ) {
-        uint64_t step;
-        addr = find_pdpe(pmap, va, &value);
-        if (addr == UINT64_MAX) {
-            va += 0x1000;
-            continue;
+    for (uint64_t addr = ktext(0); addr < KERNEL_ADDRESS_DATA_BASE; addr += 0x1000) {
+        pde_addr = find_pde(pmap, addr, &pde);
+        if (pde_addr != 0xFFFFFFFFFFFFFFFFull) {
+            CLEAR_PDE_BIT(pde, XOTEXT);
+            SET_PDE_BIT(pde, RW);
+            kwrite64(pde_addr, pde);
         }
-        if (PDE_FIELD(value, PS)) {
-            step = 1ULL << 30;
-        } else {
-            addr = find_pde(pmap, va, &value);
-            if (addr == UINT64_MAX) {
-                va += 0x1000;
-                continue;
-            }
-            if (PDE_FIELD(value, PS)) {
-                step = 1ULL << 21;
-            } else {
-                addr = find_pte(pmap, va, &value);
-                if (addr == UINT64_MAX) {
-                    va += 0x1000;
-                    continue;
-                }
-                step = 0x1000;
-            }
+        pte_addr = find_pte(pmap, addr, &pte);
+        if (pte_addr != 0xFFFFFFFFFFFFFFFFull) {
+            CLEAR_PDE_BIT(pte, XOTEXT);
+            SET_PDE_BIT(pte, RW);
+            kwrite64(pte_addr, pte);
         }
-        if (update_entry(addr, value, xo, rw)) return -1;
-        va = (va & ~(step - 1)) + step;
     }
     return 0;
 }

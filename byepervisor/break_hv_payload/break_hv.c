@@ -13,6 +13,8 @@ void vmcb_disable_np(uint64_t *param)
   uint64_t hv_heap_off = param[4];
   uint64_t pcpus       = param[5];
 
+  write64(param[2], 0xcafedead00001337ULL);
+
   uint64_t heap = read64(dmap + hv_heap_off);
 
   for (int core = 0; core < 16; core++) {
@@ -31,6 +33,4 @@ void vmcb_disable_np(uint64_t *param)
     write64(dmap + vpa + VMCB_NESTED_CTRL, old & ~1);               // disable nested paging
     write32(dmap + vpa + VMCB_CLEAN, 0);                            // force reload on next VMRUN
   }
-  // Publish completion only after updating the VMCBs, not on entry.
-  write64(param[2], 0xcafedead00001337ULL);
 }
