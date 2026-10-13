@@ -108,15 +108,15 @@ static int prepare_page_tables(uint64_t pmap)
     const uint64_t xo = 1ULL << PDE_XOTEXT;
     const uint64_t rw = 1ULL << PDE_RW;
     addr = find_pml4e(pmap, va, &value);
-    if (update_entry(addr, value, nx, 0)) return -1;
+    if (addr == UINT64_MAX || update_entry(addr, value, nx, 0)) return -1;
     addr = find_pdpe(pmap, va, &value);
-    if (update_entry(addr, value, nx, 0)) return -1;
+    if (addr == UINT64_MAX || update_entry(addr, value, nx, 0)) return -1;
     if (!PDE_FIELD(value, PS)) {
         addr = find_pde(pmap, va, &value);
-        if (update_entry(addr, value, nx, 0)) return -1;
+        if (addr == UINT64_MAX || update_entry(addr, value, nx, 0)) return -1;
         if (!PDE_FIELD(value, PS)) {
             addr = find_pte(pmap, va, &value);
-            if (update_entry(addr, value, nx, 0)) return -1;
+            if (addr == UINT64_MAX || update_entry(addr, value, nx, 0)) return -1;
         }
     }
 
@@ -124,16 +124,26 @@ static int prepare_page_tables(uint64_t pmap)
     for (va = ktext(0); va < (uint64_t)KERNEL_ADDRESS_DATA_BASE; ) {
         uint64_t step;
         addr = find_pdpe(pmap, va, &value);
-        if (addr == UINT64_MAX) return -1;
+        if (addr == UINT64_MAX) {
+            va += 0x1000;
+            continue;
+        }
         if (PDE_FIELD(value, PS)) {
             step = 1ULL << 30;
         } else {
             addr = find_pde(pmap, va, &value);
-            if (addr == UINT64_MAX) return -1;
+            if (addr == UINT64_MAX) {
+                va += 0x1000;
+                continue;
+            }
             if (PDE_FIELD(value, PS)) {
                 step = 1ULL << 21;
             } else {
                 addr = find_pte(pmap, va, &value);
+                if (addr == UINT64_MAX) {
+                    va += 0x1000;
+                    continue;
+                }
                 step = 0x1000;
             }
         }
@@ -149,6 +159,8 @@ int byepervisor_prepare(void)
     uint64_t cave, oracle, state, authid, mask[2] = {0}, core0[2] = {1ULL << 15, 0};
     cpusetid_t saved_set;
     int result = -1;
+    int fail_code = 0;
+    const char *fail_stage = "unknown";
 
     if (fw != 0x13600000 && fw != 0x13200000 && fw != 0x13000000) {
         notifyf("kstuff Reborn: unsupported firmware %x.%02x", fw >> 24, (fw >> 16) & 0xff);
@@ -175,30 +187,72 @@ int byepervisor_prepare(void)
         cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1,
                            sizeof(mask), (cpuset_t *)mask)) return -1;
     if (kernel_set_ucred_authid(getpid(), 0x4800000000000007ULL)) return -1;
-    if (pin_to_core(HOOK_CORE) || get_cpu_core() != HOOK_CORE) goto out;
+    /* Sony's CPU numbering is reversed by util.c (core 0 is mask bit 15).
+     * Do not compare sceKernelGetCurrentCpu() with the logical hook index. */
+    if (pin_to_core(HOOK_CORE)) {
+        fail_stage = "pin";
+        fail_code = -1;
+        goto out;
+    }
 
     if (state != STATE_ARMED) {
         uint64_t pmap = kdlsym(KERNEL_SYM_PMAP_STORE);
         uint64_t cr3 = kread64(pmap + 0x28);
-        if (!cr3 || (cr3 & 0xfff) || break_hv_len > 0x400) goto out;
-        if (kwrite(cave + 0x1000, break_hv, break_hv_len) ||
-            prepare_page_tables(pmap) || install_resume_hook(cave, cr3)) goto out;
+        if (!cr3 || (cr3 & 0xfff) || break_hv_len > 0x400) {
+            fail_stage = "cr3/payload";
+            fail_code = -1;
+            goto out;
+        }
+        if (kwrite(cave + 0x1000, break_hv, break_hv_len)) {
+            fail_stage = "payload-copy";
+            fail_code = -1;
+            goto out;
+        }
+        fail_code = prepare_page_tables(pmap);
+        if (fail_code) {
+            fail_stage = "page-tables";
+            goto out;
+        }
+        fail_code = install_resume_hook(cave, cr3);
+        if (fail_code) {
+            fail_stage = "hook-install";
+            goto out;
+        }
     }
     notifyf("kstuff Reborn: enter Rest Mode, then wake the console. kstuff will continue automatically.");
     for (;;) {
         if (cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1,
-                               sizeof(core0), (const cpuset_t *)core0) ||
-            get_cpu_core() != HOOK_CORE) goto out;
+                               sizeof(core0), (const cpuset_t *)core0)) {
+            fail_stage = "resume-affinity";
+            fail_code = -1;
+            goto out;
+        }
         uint64_t cookie = kread64(oracle);
         /* The hook's COOKIE_VAL only means it fired. Require the AP payload. */
         if (cookie == HV_COOKIE) break;
-        if (cookie != 0 && cookie != COOKIE_VAL) goto out;
+        if (cookie != 0 && cookie != COOKIE_VAL) {
+            fail_stage = "resume-cookie";
+            fail_code = -1;
+            goto out;
+        }
         sceKernelSleep(1);
     }
-    if (uninstall_hook(cave)) goto out;
+    fail_code = uninstall_hook(cave);
+    if (fail_code) {
+        fail_stage = "hook-remove";
+        goto out;
+    }
     uint64_t text;
-    if (kread(ktext(0), &text, sizeof(text))) goto out;
-    if (kwrite(cave + CAVE_STATE_OFF, &(uint64_t){STATE_DONE}, 8)) goto out;
+    if (kread(ktext(0), &text, sizeof(text))) {
+        fail_stage = "text-read";
+        fail_code = -1;
+        goto out;
+    }
+    if (kwrite(cave + CAVE_STATE_OFF, &(uint64_t){STATE_DONE}, 8)) {
+        fail_stage = "state-write";
+        fail_code = -1;
+        goto out;
+    }
     printf("Byepervisor ready; kernel text=%016lx. Installing kstuff.\n", text);
     notifyf("kstuff Reborn: hypervisor stage completed. Installing kstuff...");
     result = 0;
@@ -208,6 +262,9 @@ out:
     if (cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1,
                            sizeof(mask), (const cpuset_t *)mask)) result = -1;
     if (kernel_set_ucred_authid(getpid(), authid)) result = -1;
-    if (result) notifyf("kstuff Reborn: preparation failed. Reboot before retrying.");
+    if (result) {
+        notifyf("kstuff Reborn: failed at %s (%d). Reboot before retrying.",
+                fail_stage, fail_code);
+    }
     return result;
 }
